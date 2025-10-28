@@ -1,6 +1,7 @@
 import json
 import ai2thor.controller
-
+from typing import Dict, Any, List
+import math
 
 def horizontal_dist(p1: Dict[str, float], p2: Dict[str, float]) -> float:
     return math.sqrt((p1["x"] - p2["x"])**2 + (p1["z"] - p2["z"])**2)
@@ -43,8 +44,26 @@ def build_scene_description(traj_data: Dict[str, Any]) -> str:
     # --------------------------------------------------------------- #
     # 2. Apply deterministic modifications
     # --------------------------------------------------------------- #
-    if scene.get("object_poses"):
-        controller.step(action="SetObjectPoses", objectPoses=scene["object_poses"])
+    # TODO none of this is set properly
+    # create a single instance pose dict
+    unique_object_poses = []
+    done_objects = []
+    for entry in scene.get("object_poses"):
+        if entry['objectName'] in done_objects:
+            continue
+        else:
+            done_objects.append(entry['objectName'])
+        unique_object_poses.append(entry)
+        controller.step(
+                action="CreateObjectAtLocation",
+                objectType=entry['objectName'],
+                position={
+                "x": entry['position']['x'],
+                "y": entry['position']['y'],
+                "z": entry['position']['z']}
+            )
+
+    # controller.step(action="SetObjectPoses", objectPoses=unique_object_poses)
     if scene.get("object_toggles"):
         controller.step(action="SetObjectToggles", objectToggles=scene["object_toggles"])
     if scene.get("dirty_and_empty"):
