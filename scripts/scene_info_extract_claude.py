@@ -2,87 +2,91 @@ import json
 import ai2thor.controller
 
 
-def match_object_name(pose_name, metadata_objects, used_objects=None):
+def get_object_state_from_traj(obj_name, scene_data):
     """
-    Match object name from pose data to metadata, handling mismatches in suffix.
-    Returns the matched metadata object or None.
+    Get object state information from trajectory data.
     """
-    if used_objects is None:
-        used_objects = set()
+    # Check if object is dirty
+    is_dirty = False
+    if 'dirty_and_empty' in scene_data and scene_data['dirty_and_empty']:
+        is_dirty = obj_name in scene_data['dirty_and_empty']
     
-    pose_prefix = pose_name.split('_')[0]
+    # Check toggle state
+    is_toggled = None
+    if 'object_toggles' in scene_data and scene_data['object_toggles']:
+        for toggle in scene_data['object_toggles']:
+            toggle_id = toggle.get('objectId', '')
+            if obj_name in toggle_id or toggle_id.startswith(obj_name.split('_')[0]):
+                is_toggled = toggle.get('isOn', None)
+                break
     
-    # Try exact match first
-    for obj in metadata_objects:
-        if obj['name'] == pose_name and obj['name'] not in used_objects:
-            used_objects.add(obj['name'])
-            return obj
+    return {
+        'isDirty': is_dirty,
+        'isToggled': is_toggled
+    }
+
+
+def match_movable_object(pose_obj, metadata_objects, used_objects):
+    """
+    Match a movable object from trajectory to simulator metadata.
+    Uses position-based matching since names don't match.
+    """
+    pose_type = pose_obj['objectName'].split('_')[0]
+    pose_pos = pose_obj['position']
     
-    # Try matching by objectType instead of name prefix
-    # This handles cases where names are completely different
-    for obj in metadata_objects:
-        if obj['objectType'] == pose_prefix and obj['name'] not in used_objects:
-            used_objects.add(obj['name'])
-            return obj
+    # Find objects of the same type in metadata
+    candidates = [
+        obj for obj in metadata_objects 
+        if obj['objectType'] == pose_type 
+        and obj['name'] not in used_objects
+        and obj.get('pickupable', False)  # Only match pickupable objects
+    ]
     
-    # Last resort: try prefix match on name
-    for obj in metadata_objects:
-        if obj['name'].startswith(pose_prefix + '_') and obj['name'] not in used_objects:
-            used_objects.add(obj['name'])
-            return obj
+    if not candidates:
+        return None
+    
+    # If only one candidate, return it
+    if len(candidates) == 1:
+        used_objects.add(candidates[0]['name'])
+        return candidates[0]
+    
+    # Find closest match by position
+    best_match = None
+    min_dist = float('inf')
+    
+    for candidate in candidates:
+        if 'position' not in candidate:
+            continue
+        
+        cand_pos = candidate['position']
+        dist = ((pose_pos['x'] - cand_pos['x'])**2 + 
+                (pose_pos['y'] - cand_pos['y'])**2 + 
+                (pose_pos['z'] - cand_pos['z'])**2)**0.5
+        
+        if dist < min_dist:
+            min_dist = dist
+            best_match = candidate
+    
+    if best_match and min_dist < 0.5:  # Must be within 0.5 units
+        used_objects.add(best_match['name'])
+        return best_match
     
     return None
 
 
-def get_object_details(obj_meta):
+def extract_scene_info_combined(traj_data):
     """
-    Extract all relevant details from object metadata.
+    Extract scene information by combining:
+    - Receptacles and fixed objects from simulator
+    - Movable objects from trajectory with simulator metadata
     """
-    details = {
-        'name': obj_meta.get('name', 'Unknown'),
-        'objectType': obj_meta.get('objectType', 'Unknown'),
-        'objectId': obj_meta.get('objectId', 'Unknown'),
-        
-        # State properties
-        'isDirty': obj_meta.get('isDirty', False),
-        'isCooked': obj_meta.get('isCooked', False),
-        'isSliced': obj_meta.get('isSliced', False),
-        'isBroken': obj_meta.get('isBroken', False),
-        'isUsedUp': obj_meta.get('isUsedUp', False),
-        'isFilledWithLiquid': obj_meta.get('isFilledWithLiquid', False),
-        'fillLiquid': obj_meta.get('fillLiquid', None),
-        'temperature': obj_meta.get('temperature', 'RoomTemp'),
-        
-        # Toggleable state (for lamps, faucets, etc.)
-        'isToggled': obj_meta.get('isToggled', None) if obj_meta.get('toggleable') else None,
-        
-        # Openable state (for cabinets, drawers, etc.)
-        'isOpen': obj_meta.get('isOpen', None) if obj_meta.get('openable') else None,
-        'openness': obj_meta.get('openness', None) if obj_meta.get('openable') else None,
-        
-        # Positional info
-        'position': obj_meta.get('position', {}),
-        'rotation': obj_meta.get('rotation', {}),
-        'parentReceptacles': obj_meta.get('parentReceptacles', []),
-        
-        # Interaction properties
-        'visible': obj_meta.get('visible', False),
-        'isPickedUp': obj_meta.get('isPickedUp', False),
-        'receptacle': obj_meta.get('receptacle', False),
-        'pickupable': obj_meta.get('pickupable', False),
-        'moveable': obj_meta.get('moveable', False),
-    }
-    
-    return details
-
-
-def extract_contextual_relationships(traj_data):    
     scene = traj_data['scene']
     
     random_seed = scene['random_seed']
     if random_seed > 2147483647:  # Max int32
         random_seed = random_seed % 2147483647
 
+    # Initialize simulator
     controller = ai2thor.controller.Controller(
         agentMode="default",
         visibilityDistance=1.5,
@@ -97,173 +101,162 @@ def extract_contextual_relationships(traj_data):
         fieldOfView=90
     )
     
-    # Reset to the specific scene with random seed
+    # Reset scene
     event = controller.reset(
         scene=scene['floor_plan'],
         randomSeed=random_seed
     )
     
-    # Set object poses
-    if 'object_poses' in scene and scene['object_poses']:
-        event = controller.step(
-            action="SetObjectPoses",
-            objectPoses=scene['object_poses']
-        )
-    
-    # Set object toggles (open/closed states)
+    # Don't set object poses - we'll use the trajectory data instead
+    # Just set toggles for receptacles (open/closed states)
     if 'object_toggles' in scene and scene['object_toggles']:
-        event = controller.step(
-            action="SetObjectToggles",
-            objectToggles=scene['object_toggles']
-        )
+        try:
+            event = controller.step(
+                action="SetObjectToggles",
+                objectToggles=scene['object_toggles']
+            )
+        except:
+            pass  # Some toggles might not work
     
-    # Set dirty/clean states
-    if 'dirty_and_empty' in scene and scene['dirty_and_empty']:
-        for obj_id in scene['dirty_and_empty']:
-            controller.step(action="DirtyObject", objectId=obj_id)
-    
-    # Set agent initial position
-    if 'init_action' in scene:
-        init = scene['init_action']
-        event = controller.step(
-            action="TeleportFull",
-            x=init['x'],
-            y=init['y'],
-            z=init['z'],
-            rotation=init['rotation'],
-            horizon=init['horizon'],
-            standing=init.get('standing', True)
-        )
-    
-    # Get final metadata
+    # Get metadata - this has all receptacles and default scene objects
     event = controller.step(action="Pass")
     scene_metadata = event.metadata
 
-    # Build comprehensive scene information
     scene_info = {
         'scene_name': scene_metadata['sceneName'],
+        'random_seed': scene.get('random_seed'),
         'objects': [],
-        'spatial_relationships': [],
         'receptacles': [],
-        'items': []
+        'movable_items': [],
+        'spatial_relationships': []
     }
     
-    # Create a map of object names to their full metadata
-    obj_metadata_map = {obj['name']: obj for obj in scene_metadata['objects']}
-    
-    # Identify receptacle types from actual scene metadata
-    RECEPTACLE_TYPES = set([
-        obj['objectType'] for obj in scene_metadata['objects'] 
-        if obj['receptacle']
-    ])
-    
-    # Debug: print ALL object types in metadata
-    print(f"\nTotal objects in metadata: {len(scene_metadata['objects'])}")
-    object_types_in_metadata = {}
-    for obj in scene_metadata['objects']:
-        obj_type = obj['objectType']
-        if obj_type not in object_types_in_metadata:
-            object_types_in_metadata[obj_type] = []
-        object_types_in_metadata[obj_type].append(obj['name'])
-    
-    print(f"\nObject types available in metadata:")
-    for obj_type, names in sorted(object_types_in_metadata.items()):
-        print(f"  {obj_type}: {len(names)} instances")
-    
-    # Print non-receptacle objects
-    non_receptacles = [obj for obj in scene_metadata['objects'] if not obj['receptacle']]
-    print(f"\nNon-receptacle objects in metadata: {len(non_receptacles)}")
-    if non_receptacles:
-        print("Sample non-receptacles:")
-        for obj in non_receptacles[:20]:
-            print(f"  {obj['objectType']}: {obj['name']}")
-
-    object_poses = scene['object_poses'] if 'object_poses' in scene else []
-    
-    print(f"\nObject poses to match: {len(object_poses)}")
-    pose_types = {}
-    for pose in object_poses:
-        obj_type = pose['objectName'].split('_')[0]
-        pose_types[obj_type] = pose_types.get(obj_type, 0) + 1
-    print("Object types in poses:")
-    for obj_type, count in sorted(pose_types.items()):
-        print(f"  {obj_type}: {count} instances")
-    
-    # Group objects by type and extract details
+    # Get all receptacles from metadata (these are in the scene by default)
     receptacles = []
-    items = []
-    used_objects = set()  # Track which metadata objects we've already matched
-    
-    for obj_info in object_poses:
-        obj_name = obj_info['objectName']
-        
-        # Match object from metadata
-        obj_meta = match_object_name(obj_name, scene_metadata['objects'], used_objects)
-        
-        if obj_meta is None:
-            print(f"Warning: Could not match object {obj_name}")
-            continue
-        
-        obj_type = obj_meta['objectType']
-        obj_details = get_object_details(obj_meta)
-        
-        # Add to scene info
-        scene_info['objects'].append(obj_details)
-        
-        # Categorize as receptacle or item
-        if obj_type in RECEPTACLE_TYPES:
-            receptacles.append({'info': obj_info, 'meta': obj_meta, 'details': obj_details})
+    for obj in scene_metadata['objects']:
+        if obj['receptacle']:
+            obj_details = {
+                'name': obj['name'],
+                'objectType': obj['objectType'],
+                'objectId': obj.get('objectId'),
+                'position': obj.get('position'),
+                'rotation': obj.get('rotation'),
+                'isOpen': obj.get('isOpen') if obj.get('openable') else None,
+                'openness': obj.get('openness') if obj.get('openable') else None,
+                'isToggled': obj.get('isToggled') if obj.get('toggleable') else None,
+                'receptacle': True
+            }
+            
+            # Override with trajectory data if available
+            traj_state = get_object_state_from_traj(obj['name'], scene)
+            if traj_state['isToggled'] is not None:
+                obj_details['isToggled'] = traj_state['isToggled']
+            
+            receptacles.append(obj_details)
             scene_info['receptacles'].append(obj_details)
-        else:
-            items.append({'info': obj_info, 'meta': obj_meta, 'details': obj_details})
-            scene_info['items'].append(obj_details)
-
-    # Find spatial relationships
-    for item_data in items:
-        item = item_data['info']
-        item_meta = item_data['meta']
-        item_details = item_data['details']
+            scene_info['objects'].append(obj_details)
+    
+    print(f"Found {len(receptacles)} receptacles in scene")
+    
+    # Now process movable objects from trajectory
+    object_poses = scene.get('object_poses', [])
+    used_objects = set()
+    movable_items = []
+    
+    for pose_obj in object_poses:
+        obj_name = pose_obj['objectName']
+        obj_type = obj_name.split('_')[0]
         
-        item_name = item['objectName']
-        item_type = item_meta['objectType']
+        # Try to match with metadata
+        obj_meta = match_movable_object(pose_obj, scene_metadata['objects'], used_objects)
+        
+        if obj_meta:
+            # Use metadata + trajectory state
+            obj_details = {
+                'name': obj_meta['name'],
+                'traj_name': obj_name,  # Keep trajectory name for reference
+                'objectType': obj_meta['objectType'],
+                'objectId': obj_meta.get('objectId'),
+                'position': pose_obj['position'],  # Use trajectory position
+                'rotation': pose_obj.get('rotation'),
+                'visible': obj_meta.get('visible'),
+                'pickupable': obj_meta.get('pickupable', False),
+                
+                # State from metadata
+                'isDirty': obj_meta.get('isDirty', False),
+                'isCooked': obj_meta.get('isCooked', False),
+                'isSliced': obj_meta.get('isSliced', False),
+                'isBroken': obj_meta.get('isBroken', False),
+                'isUsedUp': obj_meta.get('isUsedUp', False),
+                'isFilledWithLiquid': obj_meta.get('isFilledWithLiquid', False),
+                'temperature': obj_meta.get('temperature', 'RoomTemp'),
+                'parentReceptacles': obj_meta.get('parentReceptacles', []),
+            }
+            
+            # Override with trajectory state where applicable
+            traj_state = get_object_state_from_traj(obj_name, scene)
+            if traj_state['isDirty']:
+                obj_details['isDirty'] = True
+            
+        else:
+            # Couldn't match - use trajectory data only
+            print(f"Warning: Could not match {obj_name} to metadata, using trajectory data only")
+            obj_details = {
+                'name': obj_name,
+                'traj_name': obj_name,
+                'objectType': obj_type,
+                'position': pose_obj['position'],
+                'rotation': pose_obj.get('rotation'),
+                'pickupable': True,  # Assume true since it's in object_poses
+            }
+            
+            # Add trajectory state
+            traj_state = get_object_state_from_traj(obj_name, scene)
+            obj_details.update(traj_state)
+        
+        movable_items.append(obj_details)
+        scene_info['movable_items'].append(obj_details)
+        scene_info['objects'].append(obj_details)
+    
+    print(f"Found {len(movable_items)} movable items from trajectory")
+    
+    # Calculate spatial relationships
+    for item in movable_items:
+        if 'position' not in item or item['position'] is None:
+            continue
+            
+        item_type = item['objectType']
         item_pos = item['position']
-
+        
         best_relationship = None
         min_distance = float('inf')
         best_receptacle = None
         
-        for recep_data in receptacles:
-            recep = recep_data['info']
-            recep_meta = recep_data['meta']
-            
+        for recep in receptacles:
+            if 'position' not in recep or recep['position'] is None:
+                continue
+                
+            recep_type = recep['objectType']
             recep_pos = recep['position']
-            recep_type = recep_meta['objectType']
             
             # Calculate distances
             horizontal_dist = ((item_pos['x'] - recep_pos['x'])**2 +
                              (item_pos['z'] - recep_pos['z'])**2)**0.5
             vertical_dist = abs(item_pos['y'] - recep_pos['y'])
             
-            # Determine relationship type based on relative positions
+            # Determine relationship
             relationship = None
             priority = float('inf')
             
-            # On top of (item above receptacle, close horizontally)
             if item_pos['y'] > recep_pos['y'] and vertical_dist < 1.5 and horizontal_dist < 1.0:
                 relationship = "on"
                 priority = horizontal_dist
-            
-            # Inside (item at similar height, very close horizontally)
             elif vertical_dist < 0.3 and horizontal_dist < 0.5:
                 relationship = "in"
                 priority = horizontal_dist
-            
-            # Next to (similar height, nearby)
             elif vertical_dist < 0.5 and horizontal_dist < 1.5:
                 relationship = "next to"
                 priority = horizontal_dist + 0.5
-            
-            # Near (within reasonable distance)
             elif horizontal_dist < 2.5:
                 relationship = "near"
                 priority = horizontal_dist + 1.0
@@ -273,17 +266,17 @@ def extract_contextual_relationships(traj_data):
                 best_relationship = relationship
                 best_receptacle = recep_type
         
-        # Build relationship description
+        # Build relationship
         rel_desc = {
             'item': item_type,
-            'item_name': item_meta['name'],
+            'item_name': item.get('name'),
             'relationship': best_relationship if best_relationship else "in room",
             'receptacle': best_receptacle,
             'item_state': {
-                'isDirty': item_details['isDirty'],
-                'isCooked': item_details['isCooked'],
-                'isSliced': item_details['isSliced'],
-                'temperature': item_details['temperature'],
+                'isDirty': item.get('isDirty', False),
+                'isCooked': item.get('isCooked', False),
+                'isSliced': item.get('isSliced', False),
+                'temperature': item.get('temperature', 'RoomTemp'),
             }
         }
         
@@ -300,25 +293,32 @@ if __name__ == "__main__":
     with open(traj_path, 'r', encoding='utf-8') as file:
         data = json.load(file)
     
-    # Debug: Print sample names from both sources
-    print("=== DEBUG INFO ===")
-    if 'object_poses' in data['scene'] and data['scene']['object_poses']:
-        print(f"\nSample object_poses names (first 5):")
-        for obj in data['scene']['object_poses'][:5]:
-            print(f"  {obj['objectName']}")
-    
-    scene_info = extract_contextual_relationships(data)
-    
-    # After scene setup, print sample metadata names
-    print(f"\nSample metadata object names (first 10):")
-    # This will be printed inside the function, so we need to modify it
+    scene_info = extract_scene_info_combined(data)
     
     # Print summary
-    print(f"\n=== RESULTS ===")
+    print(f"\n=== SCENE SUMMARY ===")
     print(f"Scene: {scene_info['scene_name']}")
     print(f"Total objects: {len(scene_info['objects'])}")
     print(f"Receptacles: {len(scene_info['receptacles'])}")
-    print(f"Items: {len(scene_info['items'])}")
+    print(f"Movable items: {len(scene_info['movable_items'])}")
+    
+    print("\n=== Sample Receptacles ===")
+    for recep in scene_info['receptacles'][:5]:
+        open_str = f" (open)" if recep.get('isOpen') else f" (closed)" if recep.get('isOpen') == False else ""
+        print(f"{recep['objectType']}: {recep['name']}{open_str}")
+    
+    print("\n=== Movable Items ===")
+    for item in scene_info['movable_items'][:10]:
+        state_parts = []
+        if item.get('isDirty'):
+            state_parts.append("dirty")
+        if item.get('isCooked'):
+            state_parts.append("cooked")
+        if item.get('isSliced'):
+            state_parts.append("sliced")
+        
+        state_str = f" ({', '.join(state_parts)})" if state_parts else ""
+        print(f"{item['objectType']}: {item.get('traj_name', item['name'])}{state_str}")
     
     print("\n=== Spatial Relationships ===")
     for rel in scene_info['spatial_relationships']:
@@ -337,6 +337,4 @@ if __name__ == "__main__":
         else:
             print(f"{rel['item']}{state_str} is {rel['relationship']}")
     
-    # Optionally save to file
-    # with open('scene_info.json', 'w') as f:
-    #     json.dump(scene_info, f, indent=2)
+ 
