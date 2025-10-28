@@ -15,6 +15,19 @@ For the latest updates, see: [**askforalfred.com**](https://askforalfred.com)
 
 ## Quickstart
 
+### MY README
+```bash
+$ git clone https://github.com/askforalfred/alfred.git alfred
+$ export ALFRED_ROOT=$(pwd)/alfred
+$ cd $ALFRED_ROOT
+$ python3 -m venv .venv
+$ . .venv/bin/activate
+$ pip install torch torchvision ai2thor
+
+$ cd data/
+$ sh download_data.sh json_feat
+```
+
 Clone repo:
 ```bash
 $ git clone https://github.com/askforalfred/alfred.git alfred
