@@ -211,7 +211,7 @@ def build_scene_description(traj_data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-traj_path = '/home/x/ws/alfred/data/json_2.1.0/train/pick_heat_then_place_in_recep-Egg-None-Fridge-6/trial_T20190907_184237_946198/traj_data.json'
+traj_path = '/home/kat049/ws/alfred/data/json_2.1.0/train/pick_heat_then_place_in_recep-Egg-None-Fridge-6/trial_T20190907_184237_946198/traj_data.json'
 with open(traj_path, 'r', encoding='utf-8') as file:
     data = json.load(file)
 build_scene_description(data)
